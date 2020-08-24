@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    component: local-dns-dispatcher
+    tier: kube-control-plane
+  name: local-dns-dispatcher
+  namespace: kube-system
+spec:
+  priorityClassName: system-node-critical
+  containers:
+  - name: coredns
+    image: "{{COREDNS_DOCKER_IMAGE}}"
+    args: [ "-conf", "/data/corefile" ]
+    livenessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /health
+        port: {{COREDNS_HEALTH_PORT}}
+        scheme: HTTP
+      initialDelaySeconds: 60
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 5
+    # resources:
+    #   requests:
+    #     memory: "32Mi"
+    #     cpu: "100m"
+    #   limits:
+    #     memory: "32Mi"
+    #     cpu: "100m"
+    volumeMounts:
+      - name: corefile
+        mountPath: /data/corefile
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        add:
+        - NET_BIND_SERVICE
+        drop:
+        - all
+      readOnlyRootFilesystem: true
+  hostNetwork: true
+  tolerations:
+  - operator: "Exists"
+    effect: "NoExecute"
+  - operator: "Exists"
+    effect: "NoSchedule"
+  volumes:
+  - hostPath:
+      path: "{{MESOS_SANDBOX}}/corefile"
+      type: File
+    name: corefile
