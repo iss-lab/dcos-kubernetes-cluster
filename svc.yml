@@ -1,0 +1,989 @@
+name: {{FRAMEWORK_NAME}}
+scheduler:
+  principal: {{SERVICE_PRINCIPAL}}
+  user: root
+pods:
+  etcd:
+    user: nobody
+    count: {{ETCD_CLUSTER_SIZE}}
+    pre-reserved-role: '{{{ETCD_PRE_RESERVED_ROLE}}}'
+    placement: '{{{ETCD_PLACEMENT_RULES}}}'
+    uris:
+      - {{BOOTSTRAP_URI}}
+    resource-sets:
+      etcd:
+        cpus: {{ETCD_CPUS}}
+        memory: {{ETCD_MEM}}
+        ports:
+          peer:
+            port: 2380
+            env-key: ETCD_LISTEN_PEER_PORT
+            vip:
+              prefix: etcd-peer
+              port: 2380
+          client:
+            port: 2379
+            env-key: ETCD_LISTEN_CLIENT_PORT
+            vip:
+              prefix: etcd
+              port: 2379
+          metrics:
+            port: 2381
+            env-key: ETCD_LISTEN_METRICS_PORT
+            vip:
+              prefix: etcd-metrics
+              port: 2381
+    volumes:
+      data:
+        path: "data-dir"
+        type: {{ETCD_DISK_TYPE}}
+        size: {{ETCD_DATA_DISK}}
+      wal:
+        path: "wal-pv"
+        type: {{ETCD_DISK_TYPE}}
+        size: {{ETCD_WAL_DISK}}
+    image: {{ETCD_DOCKER_IMAGE}}
+    networks:
+      {{VIRTUAL_NETWORK_NAME}}:
+    tasks:
+      peer:
+        goal: RUNNING
+        resource-set: etcd
+        cmd: |
+                ./bootstrap --resolve=false 2>&1
+
+                {{#HTTP_BASED_TLS_PROVISIONING}}
+                # fetch tls artifacts from the framework scheduler's api
+                # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+                #          this cannot be done in any other way as otherwise tasks will be restarted
+                #          upon each framework scheduler restart.
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/etcd-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/etcd-key.pem
+                {{/HTTP_BASED_TLS_PROVISIONING}}
+
+                chmod +x etcd-wrapper.sh
+
+                ./etcd-wrapper.sh start 2>&1
+        env:
+          PATH: "{{DEFAULT_PATH}}"
+          ETCD_LISTEN_CLIENT_PORT: 2379
+          ETCD_LISTEN_PEER_PORT: 2380
+          ETCD_LISTEN_METRICS_PORT: 2381
+          ETCD_DATA_DIR: data-dir
+          ETCD_WAL_DIR: wal-pv/wal-dir
+          ETCDCTL_API: 3
+          FRAMEWORK_VIP_HOST: {{FRAMEWORK_VIP_HOST}}
+          FRAMEWORK_NAME: {{FRAMEWORK_NAME}}
+          ETCD_QUOTA_BACKEND_BYTES: {{ETCD_QUOTA_BACKEND_BYTES}}
+          ETCD_ELECTION_TIMEOUT: {{ETCD_ELECTION_TIMEOUT}}
+          ETCD_HEARTBEAT_INTERVAL: {{ETCD_HEARTBEAT_INTERVAL}}
+        configs:
+          etcd-wrapper.sh:
+            template: etcd-wrapper.sh
+            dest: etcd-wrapper.sh
+        health-check:
+          cmd: |
+                 chmod +x etcd-wrapper.sh
+
+                 ./etcd-wrapper.sh health-check 2>&1
+          interval: 15
+          grace-period: 120
+          max-consecutive-failures: 4
+          delay: 0
+          timeout: 10
+        readiness-check:
+          cmd: |
+                chmod +x ./etcd-wrapper.sh
+
+                ./etcd-wrapper.sh readiness-check 2>&1
+          interval: 31
+          delay: 0
+          timeout: 10
+      recover:
+        goal: ONCE
+        # ----
+        # if this task is assigned the same resource-set as etcd-peer then the
+        # resource-set VIPs will point to it when it is RUNNING and DC/OS will
+        # assume etcd-peer is healthy when in fact it's not (no etcd is running,
+        # just the recovery task). Uncomment next line when KUB-124 is fixed:
+        # resource-set: etcd
+        # ----
+        # - determine dead peer from the new peer we're about to recover
+        # - remove dead peer from member list
+        # - add new peer to the member list
+        cmd: |
+                ./bootstrap --resolve=false 2>&1
+
+                {{#HTTP_BASED_TLS_PROVISIONING}}
+                # fetch tls artifacts from the framework scheduler's api
+                # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+                #          this cannot be done in any other way as otherwise tasks will be restarted
+                #          upon each framework scheduler restart.
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/etcd-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/etcd-key.pem
+                {{/HTTP_BASED_TLS_PROVISIONING}}
+
+                chmod +x etcd-wrapper.sh
+
+                ./etcd-wrapper.sh recover 2>&1
+        cpus: 0.1
+        memory: 32
+        env:
+          PATH: "{{DEFAULT_PATH}}"
+          ETCD_LISTEN_CLIENT_PORT: 2379
+          ETCD_LISTEN_PEER_PORT: 2380
+          ETCD_LISTEN_METRICS_PORT: 2381
+          ETCD_DATA_DIR: data-dir
+          ETCD_WAL_DIR: wal-pv/wal-dir
+          ETCDCTL_API: 3
+          FRAMEWORK_VIP_HOST: {{FRAMEWORK_VIP_HOST}}
+          FRAMEWORK_NAME: {{FRAMEWORK_NAME}}
+          ETCD_QUOTA_BACKEND_BYTES: {{ETCD_QUOTA_BACKEND_BYTES}}
+          ETCD_ELECTION_TIMEOUT: {{ETCD_ELECTION_TIMEOUT}}
+          ETCD_HEARTBEAT_INTERVAL: {{ETCD_HEARTBEAT_INTERVAL}}
+        configs:
+          etcd-wrapper.sh:
+            template: etcd-wrapper.sh
+            dest: etcd-wrapper.sh
+  kube-control-plane:
+    count: {{KUBERNETES_CONTROL_PLANE_COUNT}}
+    pre-reserved-role: '{{{KUBERNETES_CONTROL_PLANE_PRE_RESERVED_ROLE}}}'
+    placement: '{{{KUBERNETES_CONTROL_PLANE_PLACEMENT_RULES}}}'
+    networks:
+      {{VIRTUAL_NETWORK_NAME}}:
+    uris:
+      - {{BOOTSTRAP_URI}}
+    seccomp-unconfined: true
+    resource-sets:
+      kube-control-plane:
+        cpus: {{KUBERNETES_CONTROL_PLANE_CPUS}}
+        memory: {{KUBERNETES_CONTROL_PLANE_MEM}}
+        ports:
+          apiserver:
+            port: 6443
+            env-key: KUBE_APISERVER_PORT
+            vip:
+              prefix: apiserver
+              port: 6443
+    volumes:
+      var:
+        path: "var"
+        type: ROOT
+        size: {{KUBERNETES_CONTROL_PLANE_DISK}}
+    image: {{NODE_DOCKER_IMAGE}}
+    host-volumes:
+      opt-mesosphere:
+        host-path: /opt/mesosphere/
+        container-path: opt-mesosphere
+        mode: RO
+      lib-modules:
+        host-path: /lib/modules
+        container-path: lib-modules
+        mode: RO
+      {{#USE_AGENT_DOCKER_CERTS}}
+      docker-certs:
+        host-path: /etc/docker/certs.d
+        container-path: docker-certs
+        mode: RO
+      {{/USE_AGENT_DOCKER_CERTS}}
+      {{#OIDC_MOUNT_CA_FILE}}
+      oidc-custom-cert:
+        host-path: "{{OIDC_CA_FILE}}"
+        container-path: "oidc-custom-ca-cert.pem"
+        mode: RO
+      {{/OIDC_MOUNT_CA_FILE}}
+    secrets:
+      {{#AUDIT_POLICY_SECRET_FILE}}
+      # Mount policy secret as a file named audit-policy.yaml inside the task
+      # sandbox; this will be available for the apiserver pod in
+      # /data/audit-policy.yaml
+      audit_policy_file:
+        secret: {{AUDIT_POLICY_SECRET_FILE}}
+        file: audit-policy.yaml
+      {{/AUDIT_POLICY_SECRET_FILE}}
+      {{#ADMISSION_CONTROLLERS_EVENTRATELIMIT}}
+      # The DC/OS secret containing the EventRateLimit configuration will be
+      # mounted in the control-plane node as
+      # admission_control_eventratelimit_config.yaml and available in the
+      # kubernetes apiserver pod container at
+      # /data/admission_control_eventratelimit_config.yaml
+      event_rate_limit_config_file:
+        secret: {{ADMISSION_CONTROLLERS_EVENTRATELIMIT}}
+        file: admission_control_eventratelimit_config.yaml
+      {{/ADMISSION_CONTROLLERS_EVENTRATELIMIT}}
+      {{#ENCRYPTION_CONFIG}}
+      # configuration file for encrypting data at rest will available in the
+      # task as encryption_config.yaml
+      encryption_config:
+        secret: {{ENCRYPTION_CONFIG}}
+        file: encryption_config.yaml
+      {{/ENCRYPTION_CONFIG}}
+    tasks:
+      instance:
+        goal: RUNNING
+        labels: '{{KUBERNETES_CONTROL_PLANE_LABELS}}'
+        resource-set: kube-control-plane
+        cmd: |
+          ./bootstrap --resolve=false 2>&1
+
+          {{#HTTP_BASED_TLS_PROVISIONING}}
+          # fetch tls artifacts from the framework scheduler's api
+          # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+          #          this cannot be done in any other way as otherwise tasks will be restarted
+          #          upon each framework scheduler restart.
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/service-account-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/admin-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/admin-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/aggregator-ca-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/internal-ca-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/internal-ca-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/proxy-client-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/proxy-client-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-apiserver-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-apiserver-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-controller-manager-client-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-controller-manager-client-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-controller-manager-server-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-controller-manager-server-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-scheduler-client-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-scheduler-client-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-scheduler-server-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-scheduler-server-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-proxy-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-proxy-key.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/control-plane-kubelet-${POD_INSTANCE_INDEX}-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/control-plane-kubelet-${POD_INSTANCE_INDEX}-key.pem
+          {{/HTTP_BASED_TLS_PROVISIONING}}
+
+          chmod +x control-plane-wrapper.sh
+
+          ./control-plane-wrapper.sh 2>&1
+        env:
+          PATH: "{{DEFAULT_PATH}}"
+          KUBERNETES_SERVICE_HOST: "https://127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "6443"
+          KUBELET_HEALTHZ_PORT: 10248
+          APISERVER_HEALTHZ_PORT: 8080
+          SCHEDULER_HEALTHZ_PORT: 10259
+          CONTROLLER_MANAGER_HEALTHZ_PORT: 10257
+          KUBE_PROXY_HEALTHZ_PORT: 10256
+          KUBERNETES_AUTHORIZATION_MODE: {{KUBERNETES_AUTHORIZATION_MODE}}
+          DISABLE_INSECURE_PORT: {{DISABLE_INSECURE_PORT}}
+          PAUSE_DOCKER_IMAGE: "{{PAUSE_DOCKER_IMAGE}}"
+          KUBERNETES_CLUSTER_DNS_IP: {{KUBERNETES_CLUSTER_DNS_IP}}
+          KUBERNETES_CLUSTER_DOMAIN: {{KUBERNETES_CLUSTER_DOMAIN}}
+          KUBERNETES_CLUSTER_DNS: {{KUBERNETES_CLUSTER_DNS}}
+          KUBERNETES_SERVICE_CIDR: {{KUBERNETES_SERVICE_CIDR}}
+          APISERVER_MAX_REQUESTS_INFLIGHT: {{APISERVER_MAX_REQUESTS_INFLIGHT}}
+          APISERVER_MAX_MUTATING_REQUESTS_INFLIGHT: {{APISERVER_MAX_MUTATING_REQUESTS_INFLIGHT}}
+          APISERVER_ETCD_SERVERS: "{{APISERVER_ETCD_SERVERS}}"
+          CALICO_IPV4POOL_CIDR: "{{CALICO_IPV4POOL_CIDR}}"
+          KUBERNETES_CONTROL_PLANE_MEM: {{KUBERNETES_CONTROL_PLANE_MEM}}
+          KUBE_ALLOCATABLE_CPUS: {{KUBERNETES_CONTROL_PLANE_ALLOCATABLE_CPUS}}
+          KUBE_ALLOCATABLE_MEM: {{KUBERNETES_CONTROL_PLANE_ALLOCATABLE_MEM}}
+          KUBE_RESERVED_CPUS: {{KUBERNETES_CONTROL_PLANE_RESERVED_CPUS}}
+          KUBE_RESERVED_MEM: {{KUBERNETES_CONTROL_PLANE_RESERVED_MEM}}
+          SERVICE_NAME: {{SERVICE_NAME}}
+          KUBE_APISERVER_DOCKER_IMAGE: "{{KUBE_APISERVER_DOCKER_IMAGE}}"
+          KUBE_CONTROLLER_MANAGER_DOCKER_IMAGE: "{{KUBE_CONTROLLER_MANAGER_DOCKER_IMAGE}}"
+          KUBE_SCHEDULER_DOCKER_IMAGE: "{{KUBE_SCHEDULER_DOCKER_IMAGE}}"
+          KUBE_PROXY_DOCKER_IMAGE: "{{KUBE_PROXY_DOCKER_IMAGE}}"
+          KUBE_OVERRIDE_PROXY: "{{KUBE_NODE_OVERRIDE_PROXY}}"
+          {{#KUBE_NODE_OVERRIDE_PROXY}}
+          KUBE_HTTP_PROXY: "{{KUBE_NODE_HTTP_PROXY}}"
+          KUBE_HTTPS_PROXY: "{{KUBE_NODE_HTTPS_PROXY}}"
+          KUBE_NO_PROXY: "{{KUBE_NODE_NO_PROXY}}"
+          {{/KUBE_NODE_OVERRIDE_PROXY}}
+          USE_AGENT_DOCKER_CERTS: "{{USE_AGENT_DOCKER_CERTS}}"
+          COREDNS_DOCKER_IMAGE: "{{COREDNS_DOCKER_IMAGE}}"
+          COREDNS_HEALTH_PORT: "8081"
+          KUBE_APISERVER_FEATURE_GATES: CSINodeInfo=true,CSIDriverRegistry=true,CSIBlockVolume=true,VolumeSnapshotDataSource=true
+          KUBE_CONTROLLER_MANAGER_FEATURE_GATES: ""
+          KUBELET_FEATURE_GATES: CSINodeInfo=true,CSIDriverRegistry=true,CSIBlockVolume=true
+          KUBERNETES_DCOS_TOKEN_AUTHENTICATION: "{{KUBERNETES_DCOS_TOKEN_AUTHENTICATION}}"
+          KUBERNETES_CONTAINER_LOGS_MAX_SIZE: "{{KUBERNETES_CONTAINER_LOGS_MAX_SIZE}}"
+          OIDC_ENABLED: "{{OIDC_ENABLED}}"
+          OIDC_ISSUER_URL: "{{OIDC_ISSUER_URL}}"
+          OIDC_CLIENT_ID: "{{OIDC_CLIENT_ID}}"
+          OIDC_USERNAME_CLAIM: "{{OIDC_USERNAME_CLAIM}}"
+          OIDC_USERNAME_PREFIX: "{{OIDC_USERNAME_PREFIX}}"
+          OIDC_GROUPS_CLAIM: "{{OIDC_GROUPS_CLAIM}}"
+          OIDC_GROUPS_PREFIX: "{{OIDC_GROUPS_PREFIX}}"
+          OIDC_REQUIRED_CLAIM: "{{OIDC_REQUIRED_CLAIM}}"
+          OIDC_SIGNING_ALGS: "{{OIDC_SIGNING_ALGS}}"
+          OIDC_MOUNT_CA_FILE: "{{OIDC_MOUNT_CA_FILE}}"
+          AUDIT_POLICY_SECRET_FILE: "{{AUDIT_POLICY_SECRET_FILE}}"
+          AUDIT_LOG_MAXAGE: "{{AUDIT_LOG_MAXAGE}}"
+          AUDIT_LOG_MAXBACKUP: "{{AUDIT_LOG_MAXBACKUP}}"
+          AUDIT_LOG_MAXSIZE: "{{AUDIT_LOG_MAXSIZE}}"
+          HTTP_BASED_TLS_PROVISIONING: {{HTTP_BASED_TLS_PROVISIONING}}
+          ADMISSION_CONTROLLERS_ALWAYSPULLIMAGES: "{{ADMISSION_CONTROLLERS_ALWAYSPULLIMAGES}}"
+          ADMISSION_CONTROLLERS_EVENTRATELIMIT: "{{ADMISSION_CONTROLLERS_EVENTRATELIMIT}}"
+          ENCRYPTION_CONFIG: "{{ENCRYPTION_CONFIG}}"
+          TERMINATED_POD_GC_THRESHOLD: "{{TERMINATED_POD_GC_THRESHOLD}}"
+        configs:
+          control-plane-wrapper.sh:
+            template: control-plane-wrapper.sh
+            dest: control-plane-wrapper.sh
+          control-plane-health-checks.sh:
+            template: control-plane-health-checks.sh
+            dest: control-plane-health-checks.sh
+          kubeconfig-admin:
+            template: kubeconfigs/control-plane-kubelet.admin.template.yaml
+            dest: admin.conf
+          kubeconfig-local:
+            template: kubeconfigs/control-plane-kubelet.template.yaml
+            dest: kubelet.conf
+          kubeconfig-kube-controller-manager:
+            template: kubeconfigs/kube-controller-manager.template.yaml
+            dest: controller-manager.conf
+          kubeconfig-scheduler-proxy:
+            template: kubeconfigs/kube-scheduler.template.yaml
+            dest: scheduler.conf
+          kubeconfig-kube-proxy:
+            template: kubeconfigs/kube-proxy.template.yaml
+            dest: kube-proxy.conf
+          kube-apiserver.yml:
+            template: manifests/kube-apiserver.template.yml
+            dest: kube-apiserver.yml
+          kube-controller-manager.yml:
+            template: manifests/kube-controller-manager.template.yml
+            dest: kube-controller-manager.yml
+          kube-scheduler.yml:
+            template: manifests/kube-scheduler.template.yml
+            dest: kube-scheduler.yml
+          kube-proxy.yml:
+            template: manifests/kube-proxy.template.yml
+            dest: kube-proxy.yml
+          local-dns-dispatcher.yml:
+            template: manifests/local-dns-dispatcher.template.yml
+            dest: local-dns-dispatcher.yml
+          corefile:
+            template: manifests/corefile.template
+            dest: corefile
+          dcos-auth-webhook-config.yml:
+            template: kubeconfigs/dcos-auth-webhook-config.template.yml
+            dest: dcos-auth-webhook-config.yml
+          admission_control.yaml:
+            template: manifests/admission_control.template.yaml
+            dest: admission_control.yaml
+        health-check:
+          cmd: >
+                chmod +x control-plane-health-checks.sh
+
+                ./control-plane-health-checks.sh
+
+          # control-plane components have the liveness probe
+          # configured to restart the container after 8 failures in 2
+          # minutes.
+          #
+          # we configure the dcos task health check to restart after 5
+          # minutes. this allows the kubelet to try to recover the
+          # failing component a couple of times.
+          #
+          # minuteman will remove the failing task from its load
+          # balancing table as soon as it fails a health check.
+          interval: 15
+          grace-period: 30
+          max-consecutive-failures: 20
+          delay: 0
+          timeout: 10
+        readiness-check:
+          cmd: >
+            chmod +x control-plane-health-checks.sh
+
+            ./control-plane-health-checks.sh
+          interval: 31
+          delay: 0
+          timeout: 15
+  kube-node:
+    count: {{KUBERNETES_PRIVATE_NODE_COUNT}}
+    allow-decommission: true
+    pre-reserved-role: '{{{KUBERNETES_PRIVATE_NODE_PRE_RESERVED_ROLE}}}'
+    placement: '{{{KUBERNETES_PRIVATE_NODE_PLACEMENT_RULES}}}'
+    networks:
+      {{VIRTUAL_NETWORK_NAME}}:
+    uris:
+      - {{BOOTSTRAP_URI}}
+      - {{KUBELET_RESOURCE_WATCHDOG_URI}}
+    seccomp-unconfined: true
+    resource-sets:
+      kube-node-kubelet:
+        cpus: {{KUBERNETES_PRIVATE_NODE_CPUS}}
+        memory: {{KUBERNETES_PRIVATE_NODE_MEM}}
+    volumes:
+      var:
+        path: "var"
+        type: ROOT
+        size: {{KUBE_PRIVATE_NODE_DISK}}
+    image: {{NODE_DOCKER_IMAGE}}
+    host-volumes:
+      opt-mesosphere:
+        host-path: /opt/mesosphere/
+        container-path: opt-mesosphere
+        mode: RO
+      lib-modules:
+        host-path: /lib/modules
+        container-path: lib-modules
+        mode: RO
+      {{#USE_AGENT_DOCKER_CERTS}}
+      docker-certs:
+        host-path: /etc/docker/certs.d
+        container-path: docker-certs
+        mode: RO
+      {{/USE_AGENT_DOCKER_CERTS}}
+    tasks:
+      kubelet:
+        goal: RUNNING
+        resource-set: kube-node-kubelet
+        cmd: |
+                ./bootstrap --resolve=false 2>&1
+
+                {{#HTTP_BASED_TLS_PROVISIONING}}
+                # fetch tls artifacts from the framework scheduler's api
+                # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+                #          this cannot be done in any other way as otherwise tasks will be restarted
+                #          upon each framework scheduler restart.
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/internal-ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-tls-bootstrapping-public-token
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-tls-bootstrapping-secret-token
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-proxy-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-proxy-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-resource-watchdog-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-resource-watchdog-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/private-node-kubelet-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/private-node-kubelet-key.pem
+                {{/HTTP_BASED_TLS_PROVISIONING}}
+
+                chmod +x kubelet-wrapper.sh
+
+                printf "\n\n ######  Starting Kubelet -- ${TASK_NAME} ###### \n"
+
+                ./kubelet-wrapper.sh 2>&1
+        env:
+          PATH: "{{DEFAULT_PATH}}"
+          KUBERNETES_SERVICE_HOST: "https://apiserver.{{FRAMEWORK_VIP_HOST}}"
+          KUBERNETES_SERVICE_PORT: "6443"
+          PAUSE_DOCKER_IMAGE: "{{PAUSE_DOCKER_IMAGE}}"
+          KUBE_ALLOCATABLE_CPUS: {{KUBE_PRIVATE_ALLOCATABLE_CPUS}}
+          KUBE_ALLOCATABLE_MEM: {{KUBE_PRIVATE_ALLOCATABLE_MEM}}
+          KUBE_RESERVED_CPUS: {{KUBE_PRIVATE_RESERVED_CPUS}}
+          KUBE_RESERVED_MEM: {{KUBE_PRIVATE_RESERVED_MEM}}
+          KUBE_NODE_DISK: {{KUBE_PRIVATE_NODE_DISK}}
+          KUBE_NODE: kube-node
+          KUBE_OVERRIDE_PROXY: "{{KUBE_NODE_OVERRIDE_PROXY}}"
+          {{#KUBE_NODE_OVERRIDE_PROXY}}
+          KUBE_HTTP_PROXY: "{{KUBE_NODE_HTTP_PROXY}}"
+          KUBE_HTTPS_PROXY: "{{KUBE_NODE_HTTPS_PROXY}}"
+          KUBE_NO_PROXY: "{{KUBE_NODE_NO_PROXY}}"
+          {{/KUBE_NODE_OVERRIDE_PROXY}}
+          KUBERNETES_CLUSTER_DNS_IP: {{KUBERNETES_CLUSTER_DNS_IP}}
+          KUBERNETES_CLUSTER_DOMAIN: {{KUBERNETES_CLUSTER_DOMAIN}}
+          KUBERNETES_SERVICE_CIDR: "{{KUBERNETES_SERVICE_CIDR}}"
+          KUBELET_MAX_PODS: {{KUBELET_MAX_PODS}}
+          KUBELET_PODS_PER_CORE: {{KUBELET_PODS_PER_CORE}}
+          KUBELET_HEALTHZ_PORT: 10248
+          KUBE_PROXY_DOCKER_IMAGE: "{{KUBE_PROXY_DOCKER_IMAGE}}"
+          KUBE_PROXY_HEALTHZ_PORT: 10256
+          COREDNS_DOCKER_IMAGE: "{{COREDNS_DOCKER_IMAGE}}"
+          COREDNS_HEALTH_PORT: "8081"
+          CALICO_IPV4POOL_CIDR: "{{CALICO_IPV4POOL_CIDR}}"
+          SERVICE_NAME: {{SERVICE_NAME}}
+          KUBELET_RESOURCE_WATCHDOG_MEMORY_THRESHOLD_PERCENT: "{{KUBELET_RESOURCE_WATCHDOG_MEMORY_THRESHOLD_PERCENT}}"
+          USE_AGENT_DOCKER_CERTS: "{{USE_AGENT_DOCKER_CERTS}}"
+          KUBELET_FEATURE_GATES: CSINodeInfo=true,CSIDriverRegistry=true,CSIBlockVolume=true
+          KUBERNETES_CONTAINER_LOGS_MAX_SIZE: "{{KUBERNETES_CONTAINER_LOGS_MAX_SIZE}}"
+        configs:
+          kubelet-wrapper.sh:
+            template: kubelet-wrapper.sh
+            dest: kubelet-wrapper.sh
+          kube-node-readiness-checks.sh:
+            template: kube-node-readiness-checks.sh
+            dest: kube-node-readiness-checks.sh
+          kubeconfig-bootstrap-kubelet:
+            template: kubeconfigs/bootstrap-kubelet.template.yaml
+            dest: bootstrap-kubelet.conf
+          kubeconfig-kube-proxy:
+            template: kubeconfigs/kube-proxy.template.yaml
+            dest: kube-proxy.conf
+          kubeconfig-kubelet-resource-watchdog:
+            template: kubeconfigs/kubelet-resource-watchdog.template.yaml
+            dest: kubelet-resource-watchdog.conf
+          kube-proxy.yml:
+            template: manifests/kube-proxy.template.yml
+            dest: kube-proxy.yml
+          local-dns-dispatcher.yml:
+            template: manifests/local-dns-dispatcher.template.yml
+            dest: local-dns-dispatcher.yml
+          corefile:
+            template: manifests/corefile.template
+            dest: corefile
+        health-check:
+          cmd: >
+                HTTP_CODE=$(/usr/bin/curl
+                --silent --output /dev/null --fail --write-out "%{http_code}"
+                http://127.0.0.1:10248/healthz)
+                && [ "$HTTP_CODE" -eq "200" ]
+          interval: 15
+          grace-period: 30
+          max-consecutive-failures: 3
+          delay: 0
+          timeout: 10
+        readiness-check:
+          cmd: >
+                chmod +x kube-node-readiness-checks.sh
+
+                ./kube-node-readiness-checks.sh
+          interval: 31
+          delay: 0
+          timeout: 15
+  kube-node-public:
+    count: {{KUBERNETES_PUBLIC_NODE_COUNT}}
+    allow-decommission: true
+    pre-reserved-role: '{{{KUBERNETES_PUBLIC_NODE_PRE_RESERVED_ROLE}}}'
+    placement: '{{{KUBERNETES_PUBLIC_NODE_PLACEMENT_RULES}}}'
+    uris:
+      - {{BOOTSTRAP_URI}}
+      - {{KUBELET_RESOURCE_WATCHDOG_URI}}
+    seccomp-unconfined: true
+    resource-sets:
+      kube-node-kubelet:
+        cpus: {{KUBERNETES_PUBLIC_NODE_CPUS}}
+        memory: {{KUBERNETES_PUBLIC_NODE_MEM}}
+        # use port reservations for kube-node to avoid running multiple kube-node-public on the same agent. also reserve 80
+        # and 443 since we plan on these to be used by customers for ingress.
+        ports:
+          http:
+            port: 80
+          https:
+            port: 443
+          kubelet-health:
+            port: 10248
+          kubelet-http:
+            port: 10250
+    volumes:
+      var:
+        path: "var"
+        type: ROOT
+        size: {{KUBE_PUBLIC_NODE_DISK}}
+    image: {{NODE_DOCKER_IMAGE}}
+    host-volumes:
+      opt-mesosphere:
+        host-path: /opt/mesosphere/
+        container-path: opt-mesosphere
+        mode: RO
+      lib-modules:
+        host-path: /lib/modules
+        container-path: lib-modules
+        mode: RO
+      {{#USE_AGENT_DOCKER_CERTS}}
+      docker-certs:
+        host-path: /etc/docker/certs.d
+        container-path: docker-certs
+        mode: RO
+      {{/USE_AGENT_DOCKER_CERTS}}
+    tasks:
+      kubelet:
+        goal: RUNNING
+        resource-set: kube-node-kubelet
+        cmd: |
+                ./bootstrap --resolve=false 2>&1
+
+                {{#HTTP_BASED_TLS_PROVISIONING}}
+                # fetch tls artifacts from the framework scheduler's api
+                # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+                #          this cannot be done in any other way as otherwise tasks will be restarted
+                #          upon each framework scheduler restart.
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/internal-ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-tls-bootstrapping-public-token
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-tls-bootstrapping-secret-token
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-proxy-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kube-proxy-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-resource-watchdog-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-resource-watchdog-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/public-node-kubelet-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/public-node-kubelet-key.pem
+                {{/HTTP_BASED_TLS_PROVISIONING}}
+
+                chmod +x kubelet-wrapper.sh
+
+                printf "\n\n ######  Starting Kubelet (on public node) -- ${TASK_NAME} ###### \n"
+
+                # public kube-node requires a new UTS namespace to set hostname
+                # without affecting host agent
+                unshare -u ./kubelet-wrapper.sh 2>&1
+        env:
+          PATH: "{{DEFAULT_PATH}}"
+          KUBERNETES_SERVICE_HOST: "https://apiserver.{{FRAMEWORK_VIP_HOST}}"
+          KUBERNETES_SERVICE_PORT: "6443"
+          PAUSE_DOCKER_IMAGE: "{{PAUSE_DOCKER_IMAGE}}"
+          KUBE_ALLOCATABLE_CPUS: {{KUBE_PUBLIC_ALLOCATABLE_CPUS}}
+          KUBE_ALLOCATABLE_MEM: {{KUBE_PUBLIC_ALLOCATABLE_MEM}}
+          KUBE_RESERVED_CPUS: {{KUBE_PUBLIC_RESERVED_CPUS}}
+          KUBE_RESERVED_MEM: {{KUBE_PUBLIC_RESERVED_MEM}}
+          KUBE_NODE_DISK: {{KUBE_PUBLIC_NODE_DISK}}
+          KUBE_NODE: kube-node-public
+          KUBE_NODE_LABELS: kubernetes.dcos.io/node-type=public
+          KUBE_NODE_TAINTS: node-type.kubernetes.dcos.io/public=true:NoSchedule
+          KUBE_OVERRIDE_PROXY: "{{KUBE_NODE_OVERRIDE_PROXY}}"
+          {{#KUBE_NODE_OVERRIDE_PROXY}}
+          KUBE_HTTP_PROXY: "{{KUBE_NODE_HTTP_PROXY}}"
+          KUBE_HTTPS_PROXY: "{{KUBE_NODE_HTTPS_PROXY}}"
+          KUBE_NO_PROXY: "{{KUBE_NODE_NO_PROXY}}"
+          {{/KUBE_NODE_OVERRIDE_PROXY}}
+          KUBERNETES_CLUSTER_DNS_IP: {{KUBERNETES_CLUSTER_DNS_IP}}
+          KUBERNETES_CLUSTER_DOMAIN: {{KUBERNETES_CLUSTER_DOMAIN}}
+          KUBERNETES_CLUSTER_DNS: {{KUBERNETES_CLUSTER_DNS}}
+          KUBELET_MAX_PODS: {{KUBELET_MAX_PODS}}
+          KUBELET_PODS_PER_CORE: {{KUBELET_PODS_PER_CORE}}
+          KUBELET_HEALTHZ_PORT: 10248
+          KUBE_PROXY_DOCKER_IMAGE: "{{KUBE_PROXY_DOCKER_IMAGE}}"
+          KUBE_PROXY_HEALTHZ_PORT: 10256
+          COREDNS_DOCKER_IMAGE: "{{COREDNS_DOCKER_IMAGE}}"
+          COREDNS_HEALTH_PORT: "8081"
+          CALICO_IPV4POOL_CIDR: "{{CALICO_IPV4POOL_CIDR}}"
+          SERVICE_NAME: {{SERVICE_NAME}}
+          KUBELET_RESOURCE_WATCHDOG_MEMORY_THRESHOLD_PERCENT: "{{KUBELET_RESOURCE_WATCHDOG_MEMORY_THRESHOLD_PERCENT}}"
+          USE_AGENT_DOCKER_CERTS: "{{USE_AGENT_DOCKER_CERTS}}"
+          KUBELET_FEATURE_GATES: CSINodeInfo=true,CSIDriverRegistry=true,CSIBlockVolume=true
+          VIRTUAL_NETWORK_NAME: {{VIRTUAL_NETWORK_NAME}}
+          KUBERNETES_CONTAINER_LOGS_MAX_SIZE: "{{KUBERNETES_CONTAINER_LOGS_MAX_SIZE}}"
+        configs:
+          kubelet-wrapper.sh:
+            template: kubelet-wrapper.sh
+            dest: kubelet-wrapper.sh
+          kube-node-readiness-checks.sh:
+            template: kube-node-readiness-checks.sh
+            dest: kube-node-readiness-checks.sh
+          kubeconfig-bootstrap-kubelet:
+            template: kubeconfigs/bootstrap-kubelet.template.yaml
+            dest: bootstrap-kubelet.conf
+          kubeconfig-kube-proxy:
+            template: kubeconfigs/kube-proxy.template.yaml
+            dest: kube-proxy.conf
+          kubeconfig-kubelet-resource-watchdog:
+            template: kubeconfigs/kubelet-resource-watchdog.template.yaml
+            dest: kubelet-resource-watchdog.conf
+          kube-proxy.yml:
+            template: manifests/kube-proxy.template.yml
+            dest: kube-proxy.yml
+          local-dns-dispatcher.yml:
+            template: manifests/local-dns-dispatcher.template.yml
+            dest: local-dns-dispatcher.yml
+          corefile:
+            template: manifests/corefile.template
+            dest: corefile
+        health-check:
+          cmd: >
+                HTTP_CODE=$(/usr/bin/curl
+                --silent --output /dev/null --fail --write-out "%{http_code}"
+                http://127.0.0.1:10248/healthz)
+                && [ "$HTTP_CODE" -eq "200" ]
+          interval: 15
+          grace-period: 30
+          max-consecutive-failures: 3
+          delay: 0
+          timeout: 10
+        readiness-check:
+          cmd: >
+                chmod +x kube-node-readiness-checks.sh
+
+                ./kube-node-readiness-checks.sh
+          interval: 31
+          delay: 0
+          timeout: 15
+  dcos-kubernetes-cluster-metrics-exporter:
+    user: nobody
+    count: 1
+    allow-decommission: true
+    uris:
+    - {{BOOTSTRAP_URI}}
+    resource-sets:
+      dcos-kubernetes-cluster-metrics-exporter:
+        cpus: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_CPUS}}
+        memory: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_MEM}}
+        ports:
+          dcos-kubernetes-cluster-metrics-exporter:
+            port: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_PORT}}
+    volumes:
+      # reserve some disk space for the task
+      volume:
+        path: "volume"
+        type: ROOT
+        size: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_DISK}}
+    image: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_IMAGE}}
+    tasks:
+      instance:
+        goal: RUNNING
+        resource-set: dcos-kubernetes-cluster-metrics-exporter
+        labels: "DCOS_METRICS_FORMAT:prometheus,DCOS_METRICS_PORT_INDEX:0,DCOS_METRICS_ENDPOINT:/metrics"
+        cmd: |
+          ./bootstrap --resolve=false 2>&1
+
+          {{#HTTP_BASED_TLS_PROVISIONING}}
+          # fetch tls artifacts from the framework scheduler's api
+          # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+          #          this cannot be done in any other way as otherwise tasks will be restarted
+          #          upon each framework scheduler restart.
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/dcos-kubernetes-cluster-metrics-exporter-crt.pem
+          curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/dcos-kubernetes-cluster-metrics-exporter-key.pem
+          {{/HTTP_BASED_TLS_PROVISIONING}}
+
+          # bind to all interfaces:
+          # 1) dcos-telegraf is hardcoded to use localhost
+          # https://github.com/dcos/telegraf/blob/1.9.4-dcos/plugins/inputs/prometheus/prometheus.go#L521
+          # 2) another prometheus instance running in the DC/OS
+          # cluster is able to scrape the metrics if necessary
+          /usr/local/bin/dcos-kubernetes-cluster-metrics-exporter \
+          --block-duration ${DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_BLOCK_DURATION} \
+          --listen-address 0.0.0.0:${DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_PORT} \
+          --lookback-delta ${DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_LOOKBACK_DELTA} \
+          --retention-duration ${DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_RETENTION_DURATION} \
+          --kubernetes-cluster-name ${CLUSTER_NAME} 2>&1
+        env:
+          DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_BLOCK_DURATION: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_BLOCK_DURATION}}
+          DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_LOOKBACK_DELTA: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_LOOKBACK_DELTA}}
+          DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_RETENTION_DURATION: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ADVANCED_RETENTION_DURATION}}
+          DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_PORT: {{DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_PORT}}
+          FRAMEWORK_VIP_HOST: "{{FRAMEWORK_VIP_HOST}}"
+          KUBERNETES_HIGH_AVAILABILITY: "{{KUBERNETES_HIGH_AVAILABILITY}}"
+          PATH: "{{DEFAULT_PATH}}"
+          CLUSTER_NAME: "{{MARATHON_APP_LABEL_DCOS_SERVICE_NAME}}"
+        configs:
+          config.yaml:
+            template: manifests/dcos-kubernetes-cluster-metrics-exporter-config.yaml
+            dest: config.yaml
+        health-check:
+          cmd: >
+            curl --silent --output /dev/null --fail --write-out "%{http_code}" http://$MESOS_CONTAINER_IP:$DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_PORT/health
+          interval: 15
+          grace-period: 30
+          max-consecutive-failures: 3
+          delay: 0
+          timeout: 10
+        readiness-check:
+          cmd: >
+            curl --silent --output /dev/null --fail --write-out "%{http_code}" http://$MESOS_CONTAINER_IP:$DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_PORT/health
+          interval: 31
+          delay: 0
+          timeout: 15
+  mandatory-addons:
+    count: 1
+    uris:
+      - {{BOOTSTRAP_URI}}
+    resource-sets:
+      addons:
+        cpus: 0.1
+        memory: 128
+    image: {{ADDONS_DOCKER_IMAGE}}
+    host-volumes:
+      opt-mesosphere:
+        host-path: /opt/mesosphere/
+        container-path: opt-mesosphere
+        mode: RO
+    networks:
+      {{VIRTUAL_NETWORK_NAME}}:
+    tasks:
+      instance:
+        goal: FINISH
+        resource-set: addons
+        cmd: |
+                ./bootstrap --resolve=false 2>&1
+
+                {{#HTTP_BASED_TLS_PROVISIONING}}
+                # fetch tls artifacts from the framework scheduler's api
+                # WARNING: using SCHEDULER_API_HOSTNAME and SCHEDULER_API_PORT is MANDATORY
+                #          this cannot be done in any other way as otherwise tasks will be restarted
+                #          upon each framework scheduler restart.
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/admin-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/admin-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-tls-bootstrapping-public-token
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubelet-tls-bootstrapping-secret-token
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/aggregator-ca-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/metrics-server-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/metrics-server-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/dklb-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/dklb-key.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubernetes-dashboard-crt.pem
+                curl -fsSO http://${SCHEDULER_API_HOSTNAME}:${SCHEDULER_API_PORT}/v1/tls/certificates/kubernetes-dashboard-key.pem
+                {{/HTTP_BASED_TLS_PROVISIONING}}
+
+                chmod +x ./install-addons.sh
+                ./install-addons.sh
+        env:
+          PATH: "{{DEFAULT_PATH}}"
+          KUBERNETES_SERVICE_HOST: "https://apiserver.{{FRAMEWORK_VIP_HOST}}"
+          KUBERNETES_SERVICE_PORT: "6443"
+          CALICO_TYPHA_IMAGE: "{{CALICO_TYPHA_IMAGE}}"
+          CALICO_NODE_IMAGE: "{{CALICO_NODE_IMAGE}}"
+          CALICO_CNI_IMAGE: "{{CALICO_CNI_IMAGE}}"
+          CALICO_POD2DAEMON_IMAGE: "{{CALICO_POD2DAEMON_IMAGE}}"
+          CALICO_KUBE_CONTROLLERS_IMAGE: "{{CALICO_KUBE_CONTROLLERS_IMAGE}}"
+          CALICO_CNI_MTU: {{CALICO_CNI_MTU}}
+          CALICO_IPV4POOL_CIDR: "{{CALICO_IPV4POOL_CIDR}}"
+          CALICO_IPV4POOL_IPIP: "{{CALICO_IPV4POOL_IPIP}}"
+          CALICO_IP_AUTODETECTION_METHOD: "{{{CALICO_IP_AUTODETECTION_METHOD}}}"
+          CALICO_FELIX_IPINIPMTU: {{CALICO_FELIX_IPINIPMTU}}
+          CALICO_FELIX_IPINIPENABLED: {{CALICO_FELIX_IPINIPENABLED}}
+          CALICO_TYPHA_ENABLED: {{CALICO_TYPHA_ENABLED}}
+          CALICO_TYPHA_REPLICAS: {{CALICO_TYPHA_REPLICAS}}
+          COREDNS_DOCKER_IMAGE: "{{COREDNS_DOCKER_IMAGE}}"
+          COREDNS_HEALTH_PORT: "8081"
+          KUBERNETES_CLUSTER_DNS_IP: "{{KUBERNETES_CLUSTER_DNS_IP}}"
+          KUBERNETES_CLUSTER_DNS_REPLICA_COUNT: {{KUBERNETES_CLUSTER_DNS_REPLICA_COUNT}}
+          KUBERNETES_CLUSTER_DOMAIN: "{{KUBERNETES_CLUSTER_DOMAIN}}"
+          KUBERNETES_HIGH_AVAILABILITY: "{{KUBERNETES_HIGH_AVAILABILITY}}"
+          METRICS_SERVER_DOCKER_IMAGE: "{{METRICS_SERVER_DOCKER_IMAGE}}"
+          DASHBOARD_DOCKER_IMAGE: "{{DASHBOARD_DOCKER_IMAGE}}"
+          METRICS_SCRAPER_DOCKER_IMAGE: "{{METRICS_SCRAPER_DOCKER_IMAGE}}"
+          DCOS_AUTH_WEBHOOK_IMAGE: "{{DCOS_AUTH_WEBHOOK_IMAGE}}"
+          SERVICE_NAME: "{{SERVICE_NAME}}"
+          FRAMEWORK_NAME: "{{FRAMEWORK_NAME}}"
+          KUBERNETES_CONTROL_PLANE_COUNT: {{KUBERNETES_CONTROL_PLANE_COUNT}}
+          KUBERNETES_PRIVATE_NODE_COUNT: {{KUBERNETES_PRIVATE_NODE_COUNT}}
+          KUBERNETES_PUBLIC_NODE_COUNT: {{KUBERNETES_PUBLIC_NODE_COUNT}}
+        configs:
+          install-addons.sh:
+            template: install-addons.sh
+            dest: install-addons.sh
+          kubeconfig-admin:
+            template: kubeconfigs/admin.template.yaml
+            dest: admin.conf
+          calico.yaml:
+            template: addons/calico.template.yaml
+            dest: calico.yaml
+          additional-cluster-role-bindings:
+            template: addons/additional-cluster-role-bindings.yaml
+            dest: additional-cluster-role-bindings.addon.yaml
+          kubelet-tls-bootstrapping:
+            template: addons/kubelet-tls-bootstrapping.template.yaml
+            # must not end with .addon.yaml as the others since it needs to be
+            # templated before "kubectl apply"
+            dest: kubelet-tls-bootstrapping.template.yaml
+          coredns:
+            template: addons/coredns.template.yaml
+            dest: coredns.addon.yaml
+          metrics-server:
+            template: addons/metrics-server.template.yaml
+            # must not end with .addon.yaml as the others since it needs to be
+            # templated before "kubectl apply"
+            dest: metrics-server.template.yaml
+          dklb:
+            template: addons/dklb.template.yaml
+            # must not end with .addon.yaml as the others since it needs to be
+            # templated before "kubectl apply"
+            dest: dklb.template.yaml
+          prerequisites-velero:
+            template: addons/prerequisites-velero.yaml
+            dest: prerequisites-velero.addon.yaml
+{{#KUBERNETES_DCOS_TOKEN_AUTHENTICATION}}
+          dcos-auth-webhook:
+            template: addons/dcos-auth-webhook-server.template.yaml
+            # must not end with .addon.yaml as the others since it needs to be
+            # templated before "kubectl apply"
+            dest: dcos-auth-webhook-server.template.yaml
+{{/KUBERNETES_DCOS_TOKEN_AUTHENTICATION}}
+          dashboard:
+            template: addons/dashboard.template.yaml
+            # must not end with .addon.yaml as the others since it needs to be
+            # templated before "kubectl apply"
+            dest: dashboard.template.yaml
+          kubelet-resource-watchdog.yaml:
+            template: addons/prerequisites-kubelet-resource-watchdog.yaml
+            dest: prerequisites-kubelet-resource-watchdog.addon.yaml
+          mke-cluster-info:
+             template: addons/mke-cluster-info.template.yaml
+             # must not end with .addon.yaml as the others since it needs to be
+             # templated before "kubectl apply"
+             dest: mke-cluster-info.template.yaml
+{{#DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ENABLED}}
+          dcos-kubernetes-cluster-metrics-exporter:
+            template: addons/dcos-kubernetes-cluster-metrics-exporter.yaml
+            dest: dcos-kubernetes-cluster-metrics-exporter.addon.yaml
+{{/DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ENABLED}}
+plans:
+  deploy:
+    strategy: serial
+    phases:
+      etcd:
+        strategy: serial
+        pod: etcd
+        steps:
+        - default: [[peer]]
+      control-plane:
+        strategy: parallel
+        pod: kube-control-plane
+        steps:
+        - default: [[instance]]
+      mandatory-addons:
+        strategy: serial
+        pod: mandatory-addons
+        steps:
+        - default: [[instance]]
+      node:
+        strategy: parallel
+        pod: kube-node
+        steps:
+        - default: [[kubelet]]
+      public-node:
+        strategy: parallel
+        pod: kube-node-public
+        steps:
+        - default: [[kubelet]]
+{{#DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ENABLED}}
+      dcos-kubernetes-cluster-metrics-exporter:
+        strategy: serial
+        pod: dcos-kubernetes-cluster-metrics-exporter
+        steps:
+        - default: [[instance]]
+{{/DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ENABLED}}
+  update:
+    strategy: serial
+    phases:
+      etcd:
+        strategy: serial
+        pod: etcd
+        steps:
+        - default: [[peer]]
+      control-plane:
+        strategy: serial
+        pod: kube-control-plane
+        steps:
+        - default: [[instance]]
+      mandatory-addons:
+          strategy: serial
+          pod: mandatory-addons
+          steps:
+          - default: [[instance]]
+      node:
+        strategy: serial
+        pod: kube-node
+        steps:
+        - default: [[kubelet]]
+      public-node:
+        strategy: serial
+        pod: kube-node-public
+        steps:
+        - default: [[kubelet]]
+{{#DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ENABLED}}
+      dcos-kubernetes-cluster-metrics-exporter:
+        strategy: serial
+        pod: dcos-kubernetes-cluster-metrics-exporter
+        steps:
+        - default: [[instance]]
+{{/DCOS_KUBERNETES_CLUSTER_METRICS_EXPORTER_ENABLED}}
+  replace:
+    strategy: serial
+    phases:
+      etcd:
+        strategy: serial
+        pod: etcd
+        steps:
+        - default: [[recover],[peer]]
